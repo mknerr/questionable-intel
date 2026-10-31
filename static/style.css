@@ -49,6 +49,8 @@ a { color: var(--accent); }
 }
 h1, h2, h3 { margin: 0 0 10px; }
 .small-muted { color: var(--ink-dim); font-size: 15px; }
+.site-foot { padding: 16px; text-align: center; font-size: 14px; font-weight: 600; }
+.site-foot a { display: inline-block; padding: 12px 8px; color: var(--ink-dim); }
 kbd {
   font-family: var(--condensed); font-size: 14px; font-weight: 800;
   padding: 2px 6px; border: 1px solid currentColor;
