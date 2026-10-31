@@ -1,0 +1,91 @@
+# Questionable Intel: a self-hosted trivia app, one service (`trivia-knight`).
+#
+# Commands:
+#   docker compose up -d           Pulls the published image from ghcr.io. If the
+#                                  registry does not have it, Compose builds it from
+#                                  this checkout instead.
+#   docker compose up -d --build   Builds from this checkout and tags the result with
+#                                  the image name, so later plain `up` runs reuse it.
+#   docker compose pull            Refreshes the published image.
+#
+# Caveats:
+#   - A plain `up` never rebuilds from changed source. After editing code, use
+#     `--build`.
+#   - A plain `up` tries the registry first. Where the published image exists, it
+#     replaces a local build with it.
+#   - The `build:` section needs the source checkout. Someone with only this file
+#     gets the published image and nothing else.
+#
+# Configuration goes in `.env` next to this file (see `.env.example`).
+#
+# Data: see the `volumes:` section below. By default it lives in a Docker-managed
+# named volume; set TRIVIA_DATA_MOUNT=./data to keep it in a host directory.
+
+services:
+  trivia-knight:
+    build: .
+    image: ${TRIVIA_IMAGE:-ghcr.io/mknerr/questionable-intel:latest}
+    container_name: trivia-knight
+    restart: unless-stopped
+    # Loads a local `.env` (see `.env.example`) into the container. `required:
+    # false` keeps `docker compose up` working when `.env` is absent; the defaults
+    # below are used instead. Compose also reads `.env` for the `${…}`
+    # interpolation in `environment:` and `ports:` below.
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      TRIVIA_HOST: "${TRIVIA_HOST:-0.0.0.0}"
+      TRIVIA_PORT: "${TRIVIA_PORT:-8130}"
+      # In-container data dir (the volume target). Deliberately not templated from
+      # `.env`, whose `TRIVIA_DATA_DIR=./data` is host-relative.
+      TRIVIA_DATA_DIR: "/data"
+      # LLM endpoint, model and optional bearer token. An empty value means the
+      # app's built-in default: DeepSeek (https://api.deepseek.com), which needs
+      # TRIVIA_LLM_API_KEY. Set TRIVIA_LLM_BASE / TRIVIA_LLM_MODEL to use another
+      # OpenAI-compatible endpoint, or configure it in the host console. Settings
+      # saved in the host console override these values.
+      # An Ollama server on the Docker host is reached at
+      # http://host.docker.internal:11434/v1 (see `extra_hosts` below).
+      TRIVIA_LLM_BASE: "${TRIVIA_LLM_BASE:-}"
+      TRIVIA_LLM_MODEL: "${TRIVIA_LLM_MODEL:-}"
+      TRIVIA_LLM_API_KEY: "${TRIVIA_LLM_API_KEY:-}"
+      # Admin token for the management APIs and console (>=16 chars). Management
+      # stays locked (403) until this is set. See `.env.example`.
+      TRIVIA_ADMIN_TOKEN: "${TRIVIA_ADMIN_TOKEN:-}"
+      # Public base URL for join links and QR codes (public HTTPS deployment).
+      # Leave empty for direct LAN play.
+      TRIVIA_PUBLIC_BASE_URL: "${TRIVIA_PUBLIC_BASE_URL:-}"
+      # Trust X-Forwarded-For only from this reverse-proxy IP (e.g. a Nginx Proxy
+      # Manager host). Leave empty when the app is reached directly, the safe default.
+      TRIVIA_TRUSTED_PROXIES: "${TRIVIA_TRUSTED_PROXIES:-}"
+    ports:
+      # Published on the host for LAN access. The app is meant for a LAN. Expose it
+      # beyond the LAN only by following docs/WEB_DEPLOYMENT.md.
+      - "${TRIVIA_PORT:-8130}:${TRIVIA_PORT:-8130}"
+    # Lets the container reach an Ollama server running on the Docker host, at
+    # host.docker.internal (see TRIVIA_LLM_BASE above).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request,os; urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('TRIVIA_PORT','8130')+'/healthz',timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    volumes:
+      # Where the SQLite file lives. The default is a Docker-managed named volume.
+      # It takes the image's /data ownership on first use, so it works without setup.
+      #
+      # To keep the database in a host directory instead (easy to back up or
+      # inspect), set TRIVIA_DATA_MOUNT=./data in `.env`. Switching an existing
+      # install between the two starts on an empty database; copy the data across
+      # first if you want to keep your games.
+      #
+      # A bind mount is created root-owned if it does not exist yet, and the non-root
+      # app cannot write to a root-owned directory. To use ./data on a new machine,
+      # create it first with `mkdir data && sudo chown 10001:10001 data`.
+      - ${TRIVIA_DATA_MOUNT:-trivia-data}:/data
+
+volumes:
+  trivia-data:

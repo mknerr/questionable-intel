@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Questionable Intel — Stage</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/theme.js"></script>
+</head>
+<body class="stage">
+<div class="stage-wrap" id="wrap">
+  <!-- filled by JS -->
+</div>
+<script>
+let gid = null, token = null, painted = null;
+function parseHash(){
+  const h = location.hash.replace(/^#/, "");
+  const p = new URLSearchParams(h);
+  return {g: p.get("g"), t: p.get("t")};
+}
+function boot(){
+  fitStage();
+  addEventListener("resize", fitStage);
+  const h = parseHash();
+  if (h.g && h.t) { gid = parseInt(h.g,10); token = h.t; }
+  else if (localStorage.getItem("tk_game_id") && localStorage.getItem("tk_host_token")) {
+    gid = parseInt(localStorage.getItem("tk_game_id"),10);
+    token = localStorage.getItem("tk_host_token");
+  }
+  if (!gid || !token) { paint(emptyHtml("No game", "Open this from the host console.")); return; }
+  poll();
+  setInterval(poll, 1000);
+}
+function $(id){ return document.getElementById(id); }
+// Escapes quotes too: several call sites interpolate into attribute values.
+function esc(x){ return String(x ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;"); }
+
+// The stage is drawn at 1920x1080 and scaled to fit whatever screen it is on.
+function fitStage(){
+  const s = Math.min(innerWidth / 1920, innerHeight / 1080);
+  const x = (innerWidth - 1920 * s) / 2, y = (innerHeight - 1080 * s) / 2;
+  $("wrap").style.transform = `translate(${x}px, ${y}px) scale(${s})`;
+}
+
+// Only touch the DOM when something changed, so the QR and animations don't restart.
+function paint(html){
+  if (html === painted) return;
+  painted = html;
+  $("wrap").innerHTML = html;
+}
+function emptyHtml(title, sub){
+  return `<div class="stage-empty"><div class="stencil">${esc(title)}</div><div>${esc(sub)}</div></div>`;
+}
+
+async function poll(){
+  try {
+    const r = await fetch(`/api/state?game_id=${gid}&role=stage`, {headers: {"X-Token": token}});
+    const s = await r.json();
+    if (s.error) { paint(emptyHtml("Not authorized", "Open the stage from the host console.")); return; }
+    render(s);
+  } catch(e) {}
+}
+
+function render(s){
+  if (s.state === "lobby") return paint(lobbyHtml(s));
+  if (s.state === "question") return paint(questionHtml(s));
+  if (s.state === "revealed") return paint(revealHtml(s));
+  if (s.state === "round_end") return paint(scoreboardHtml(s));
+  if (s.state === "final" || s.state === "finished") return paint(standingsHtml(s));
+}
+
+function plural(n, word){ return `${n} ${word}${n === 1 ? "" : "s"}`; }
+
+function lobbyHtml(s){
+  const n = s.teams.length;
+  const joinAt = s.join_url ? s.join_url.replace(/^[a-z]+:\/\//, "").split("?")[0] : `${location.host}/join`;
+  return `
+    <div class="lobby-form">
+      <div class="lobby-brand">Questionable Intel</div>
+      <div class="form-box">
+        <div class="form-row">
+          <div class="form-qr"><img src="/qr?code=${encodeURIComponent(s.code)}" alt="QR code to join"></div>
+          <div class="form-scan">Scan to report in</div>
+        </div>
+        <div class="form-cell">
+          <div class="form-label">Room code</div>
+          <div class="room-code">${esc(s.code)}</div>
+          <div class="room-phonetic">${esc(phoneticCode(s.code))}</div>
+        </div>
+        <div class="form-cell">
+          <div class="form-label">Or go to</div>
+          <div class="form-url">${esc(joinAt)}</div>
+        </div>
+      </div>
+    </div>
+    <div class="lobby-main">
+      <div class="lobby-name">${esc(s.name)}</div>
+      <div class="lobby-count">${n ? plural(n, "squad") + " in formation" : "Waiting for the first squad"}</div>
+      <div class="squad-grid ${n > 12 ? "many" : ""}">${s.teams.map(t => `
+        <div class="squad-card">${guidon(t.color_index, n > 12 ? 56 : 91)}<span>${esc(t.name)}</span></div>`).join("")}
+      </div>
+      <div class="lobby-foot">The host starts when everyone has reported in.</div>
+    </div>`;
+}
+
+function clockHtml(s){
+  if (!s.clock_running) return "";
+  const cls = s.clock_remaining <= 10 ? "urgent" : "";
+  return `<div class="stage-clock ${cls}">${s.clock_remaining}s</div>`;
+}
+
+function clockBarHtml(s){
+  if (!s.clock_running) return "";
+  const cls = s.clock_remaining <= 10 ? "urgent" : "";
+  return `<div class="clock-track"><div class="clock-fill ${cls}" style="width:${clockPercent(s)}%"></div></div>`;
+}
+
+function mediaHtml(q){
+  if (!q || q.media_type === "none" || !q.media_url) return "";
+  if (q.media_type === "image") return `<div class="media-stage"><img src="${esc(q.media_url)}" alt=""></div>`;
+  if (q.media_type === "audio") return `<div class="media-stage"><audio src="${esc(q.media_url)}" controls></audio></div>`;
+  return "";
+}
+
+function questionHtml(s){
+  const q = s.question;
+  const stemLen = (q.stem || "").length;
+  const hasMedia = q.media_type && q.media_type !== "none" && q.media_url;
+  const stemCls = (stemLen > 150 || hasMedia) ? "longer" : stemLen > 70 ? "long" : "";
+  let opts = `<div class="stage-hint">Type your answer on your phone.</div>`;
+  if (q.options && q.options.length) {
+    const longest = Math.max(...q.options.map(o => String(o).length));
+    const optCls = longest > 34 ? "longer" : longest > 16 ? "long" : "";
+    opts = `<div class="stage-options ${optCls}">` + q.options.map((o,i)=>`
+      <div class="stage-opt">
+        <div class="opt-tab"><span class="letter">${optionLetter(i)}</span><span class="word">${optionWord(i)}</span></div>
+        <div class="opt-text">${esc(o)}</div>
+      </div>`).join("") + `</div>`;
+  }
+  const count = s.round_question_count ? ` of ${s.round_question_count}` : "";
+  const pips = s.teams.map((t,i)=>`<div class="pip ${i < s.answered_count ? "on" : ""}"></div>`).join("");
+  return `
+    <div class="stage-col">
+      <div class="stage-band">Classified until reveal</div>
+      <div class="stage-body">
+        <div class="stage-head">
+          <div class="stage-qnum">Question ${q.position}${count}</div>
+          <div class="stage-points">${plural(q.points, "point")}</div>
+        </div>
+        ${mediaHtml(q)}
+        <h1 class="stage-q ${stemCls}">${esc(q.stem)}</h1>
+        ${opts}
+        <div class="stage-foot">
+          <div class="stage-report">
+            <div class="pips">${pips}</div>
+            <span>${s.answered_count} of ${plural(s.teams.length, "squad")} reported</span>
+          </div>
+          ${clockHtml(s)}
+        </div>
+      </div>
+      ${clockBarHtml(s)}
+    </div>`;
+}
+
+function answerSize(answer){
+  const len = Math.max(String(answer ?? "").length, 1);
+  return Math.max(72, Math.min(300, Math.floor(1760 / (len * .47))));
+}
+
+function revealHtml(s){
+  const q = s.question;
+  const byId = Object.fromEntries(s.teams.map(t => [t.id, t]));
+  const got = (s.reveal_results||[]).filter(r=>r.correct);
+  const many = got.length > 6;
+  const chips = got.map(r=>`
+    <div class="reveal-chip">
+      ${guidon(byId[r.team_id] ? byId[r.team_id].color_index : 0, many ? 44 : 80)}
+      <span class="name">${esc(r.name)}</span>
+      <span class="delta">+${r.delta}</span>
+    </div>`).join("");
+  const count = got.length
+    ? `${got.length} of ${plural(s.teams.length, "squad")} got it`
+    : "No squad got it";
+  return `
+    <div class="stage-col">
+      <div class="reveal-paper">
+        <div class="reveal-stem">${esc(q.stem)}</div>
+        <div class="reveal-answer" style="font-size:${answerSize(q.answer)}px">${esc(q.answer)}</div>
+        <div class="reveal-stamp">Declassified</div>
+      </div>
+      <div class="reveal-rest">
+        <div class="reveal-count">${count}</div>
+        <div class="reveal-grid ${many ? "many" : ""}">${chips}</div>
+      </div>
+    </div>`;
+}
+
+function movementFor(s, team, roundIndex){
+  // ▲ if gained points this round vs prior round; ▼ if lost; — otherwise.
+  const rt = s.round_totals[team.id] || {};
+  const rounds = s.rounds || [];
+  const cur = rounds[roundIndex];
+  const prev = rounds[roundIndex - 1];
+  if (!cur) return "—";
+  const curVal = rt[cur.id] || 0;
+  const prevVal = prev ? (rt[prev.id] || 0) : 0;
+  if (curVal > prevVal) return "▲";
+  if (curVal < prevVal) return "▼";
+  return "—";
+}
+
+function scoreRow(t, place, width, move){
+  const moveHtml = move ? `<span class="sb-move ${move === "▲" ? "up" : ""}">${move}</span>` : "";
+  return `
+    <div class="sb-row">
+      <span class="sb-rank">${place}</span>
+      ${guidon(t.color_index, width)}
+      <span class="sb-name">${esc(t.name)}</span>
+      ${moveHtml}
+      <span class="sb-score">${t.total}</span>
+    </div>`;
+}
+
+function scoreboardHtml(s){
+  const rounds = s.rounds || [];
+  const current = rounds.findIndex(r => r.id === s.current_round_id);
+  const idx = current >= 0 ? current : rounds.length - 1;
+  const sorted = [...s.teams].sort((a,b)=>b.total-a.total);
+  const n = sorted.length;
+  const listCls = (n > 7 ? "two " : "") + (n > 14 ? "compact" : "");
+  const rows = sorted.map((t,i)=>scoreRow(t, i+1, n > 14 ? 44 : 66, movementFor(s,t,idx))).join("");
+  return `
+    <div class="board">
+      <h1 class="board-title">Round ${idx+1} standings</h1>
+      <div class="board-list ${listCls}">${rows}</div>
+    </div>`;
+}
+
+function standingsHtml(s){
+  const sorted = [...s.teams].sort((a,b)=>b.total-a.total);
+  const top3 = sorted.slice(0,3).map((t,i)=>({t, place:i+1, height:[1020,860,720][i]}));
+  // Winner stands in the middle pole: 2nd, 1st, 3rd.
+  const order = top3.length >= 2 ? [top3[1], top3[0], ...top3.slice(2)] : top3;
+  const poles = order.map(({t, place, height})=>`
+    <div class="pole" style="height:${height}px">
+      <svg class="pole-flag" width="336" height="184" viewBox="0 0 336 184" aria-hidden="true">
+        <polygon points="0,0 336,0 276,92 336,184 0,184" fill="${squadColor(t.color_index)}"></polygon>
+        <svg x="40" y="26" width="113" height="132" viewBox="0 0 48 56"><path d="${squadCharge(t.color_index)}" fill="${squadInk(t.color_index)}"></path></svg>
+      </svg>
+      <div class="pole-text">
+        <div class="pole-place">${place}</div>
+        <div class="pole-name">${esc(t.name)}</div>
+        <div class="pole-score">${t.total}</div>
+      </div>
+    </div>`).join("");
+  const rest = sorted.slice(3);
+  const compact = rest.length > 7;
+  return `
+    <div class="standings">
+      <div class="poles">${poles}</div>
+      <div class="merit ${compact ? "tight" : ""}">
+        <h1 class="board-title">Order of Merit</h1>
+        <div class="board-list ${compact ? "compact" : ""}">${rest.map((t,i)=>scoreRow(t, i+4, compact ? 44 : 66)).join("")}</div>
+      </div>
+    </div>`;
+}
+
+boot();
+</script>
+</body>
+</html>

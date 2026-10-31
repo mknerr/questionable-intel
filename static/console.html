@@ -1,0 +1,1205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Questionable Intel — Host Console</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/theme.js"></script>
+</head>
+<body class="console">
+  <!-- gate -->
+  <div id="gate" class="panel gate">
+    <h1 class="gate-title">Questionable Intel</h1>
+    <div class="small-muted" style="margin-bottom:16px">Host console</div>
+    <div id="gate-status" class="gate-status" role="status"></div>
+    <!-- A real form with a username + current-password pair so a password
+         manager (iCloud Keychain, 1Password…) can save and autofill the token.
+         The page itself still never stores it. -->
+    <form id="admin-form" autocomplete="on">
+      <input type="text" name="username" autocomplete="username" value="trivia-admin" hidden readonly>
+      <label class="field-label" for="admin-token">Admin token</label>
+      <div class="gate-inline">
+        <input id="admin-token" name="password" type="password" autocomplete="current-password" placeholder="TRIVIA_ADMIN_TOKEN (16+ characters)" spellcheck="false">
+        <button class="mini" type="submit">Unlock</button>
+      </div>
+      <div class="small-muted gate-note">Required to create, select or delete games, browse the round library, and configure rounds. Kept in this page only, so you re-enter it after a reload.</div>
+    </form>
+    <div id="gate-actions" class="gate-section">
+      <div class="gate-inline">
+        <button class="cmd primary" onclick="createGame()">Start a new game</button>
+        <button id="gate-resume" class="cmd hidden" onclick="resumeGame()"></button>
+      </div>
+      <div class="gate-section">
+        <label class="field-label" for="join-game-id">Or rejoin an existing game</label>
+        <div class="gate-inline">
+          <input id="join-game-id" class="gate-id" placeholder="Game ID" aria-label="Game ID" inputmode="numeric">
+          <input id="join-token" placeholder="Host token" aria-label="Host token">
+          <button class="mini" onclick="joinGame()">Rejoin</button>
+        </div>
+      </div>
+    </div>
+    <div id="prev-games" class="gate-section hidden">
+      <h2>Previous games</h2>
+      <div class="small-muted gate-note">Selecting a game <b>rotates its host token</b>: the old host token stops working and you get a new one. Deleting removes the game and its squads, scores, and questions. Saved library rounds are kept.</div>
+      <div id="prev-games-list"></div>
+    </div>
+  </div>
+
+  <!-- active console -->
+  <div id="main" class="hidden">
+    <div class="console-top">
+      <div class="console-brand">Questionable Intel</div>
+      <div class="console-meta">Room code <span class="console-code" id="code"></span></div>
+      <div class="console-meta">Game <span id="gid"></span></div>
+      <div class="console-state" id="state-label"></div>
+      <a href="#" id="stage-link" target="_blank" rel="noopener">Open stage</a>
+      <button class="linkish" onclick="showGate()">Manage games</button>
+    </div>
+
+    <div class="console-wrap">
+      <div class="bar" id="action-bar">
+        <button id="btn-start" onclick="act('start')">Start</button>
+        <button id="btn-reveal" onclick="act('reveal')">Reveal <kbd>R</kbd></button>
+        <button id="btn-next" onclick="act('next')">Next</button>
+        <button id="btn-skip" onclick="act('skip')">Skip <kbd>S</kbd></button>
+        <button id="btn-void" onclick="act('void')">Void</button>
+        <button id="btn-next-round" onclick="act('next_round')">Next round</button>
+        <button id="btn-finish" onclick="act('finish')">Finish</button>
+        <button id="btn-undo" onclick="act('undo')">Undo <kbd>U</kbd></button>
+        <button id="btn-adlib" onclick="openAdlib()">Ad-lib <kbd>?</kbd></button>
+      </div>
+
+      <div class="console-grid">
+        <div class="console-main">
+          <section class="panel" id="question-panel">
+            <div class="q-meta">
+              <span id="q-pos"></span>
+              <span id="q-points-label"></span>
+              <button class="mini" onclick="openSetPoints()">Set points</button>
+              <span class="answered" id="answered-count"></span>
+            </div>
+            <div class="q-stem" id="q-stem"></div>
+            <div class="q-opts" id="q-opts"></div>
+            <div class="clock-row">
+              <span id="clock-readout" class="clock-readout">–</span>
+              <button class="mini" onclick="act('start_clock')">Start <kbd>C</kbd></button>
+              <button class="mini" onclick="act('pause_clock')">Pause</button>
+              <button class="mini" onclick="act('extend_clock')">+30s</button>
+              <span id="peek" class="answer-peek">Hold to peek answer</span>
+            </div>
+          </section>
+
+          <section class="panel hidden" id="judge-panel">
+            <h2>Judge answers</h2>
+            <div class="small-muted">One tap each, or press 1–8 to mark a squad right.</div>
+            <div id="judge-list" style="margin-top:10px"></div>
+          </section>
+
+          <section class="panel">
+            <h2>Rounds</h2>
+            <div class="small-muted gate-note">Pick 1–12 rounds. Each is a category to generate (10 questions by default, up to 40) or a saved library round. Configure before you start. Round 1 is playable as soon as it's ready.</div>
+            <div id="round-config"></div>
+            <div class="round-go">
+              <label class="field-label" for="round-count">Rounds</label>
+              <select id="round-count"></select>
+              <button class="mini primary" onclick="configure()">Configure</button>
+            </div>
+            <div id="round-progress" class="progress"></div>
+          </section>
+
+          <section class="panel" id="import-panel">
+            <h2>Import questions</h2>
+            <div class="small-muted gate-note">Paste or upload questions in almost any format: one per line, a Quizlet export, a spreadsheet or CSV, <b>Q:</b>/<b>A:</b> blocks, lettered A) B) C) choices, or JSON. Saving needs no AI. Afterwards choose <b>Library</b> in Rounds above to use the round.</div>
+            <div id="imp-token-row" class="hidden">
+              <label class="field-label" for="imp-token">Admin token</label>
+              <input id="imp-token" type="password" autocomplete="off" spellcheck="false" placeholder="TRIVIA_ADMIN_TOKEN (16+ characters)">
+            </div>
+            <label class="field-label" for="imp-name">Round name</label>
+            <input id="imp-name" maxlength="80" placeholder="e.g. Pub quiz 12 Oct">
+            <label class="field-label" for="imp-text">Questions</label>
+            <textarea id="imp-text" rows="9" spellcheck="false" placeholder="One question per line:&#10;Who painted the Mona Lisa?&#10;&#10;Or Q: / A: pairs:&#10;Q: Largest ocean on Earth?&#10;A: Pacific&#10;&#10;Or lettered choices (* marks the right one):&#10;Which planet is red?&#10;A) Venus&#10;*B) Mars&#10;&#10;Or paste a Quizlet export, spreadsheet rows, CSV or JSON."></textarea>
+            <div class="round-go">
+              <input id="imp-file" type="file" accept=".txt,.csv,.tsv,.json" aria-label="Choose a file to import">
+              <label class="llm-check" for="imp-swap">
+                <input id="imp-swap" type="checkbox">
+                <span>Swap question / answer</span>
+              </label>
+            </div>
+            <div class="small-muted gate-note">Quizlet sets sometimes have them backwards. Files up to 200 KB.</div>
+            <div class="round-go">
+              <button class="mini" id="imp-preview" onclick="impPreview()">Preview</button>
+              <button class="mini primary" id="imp-save" onclick="impSave()">Save as round</button>
+            </div>
+            <div id="imp-preview-out" class="progress"></div>
+            <h3 class="field-label" style="margin-top:18px">AI help (optional)</h3>
+            <div class="small-muted gate-note">With an AI model set up, it can finish half-done rows (a question with no answer, an answer with no question, no wrong choices) or write fresh questions from notes. Your question and answer text is kept word for word. <b>AI-written answers are not fact-checked, so skim them before play.</b></div>
+            <div class="round-go">
+              <button class="mini" id="imp-fill" onclick="impAI('fill')">Let AI fill the gaps</button>
+              <label class="field-label" for="imp-count">Questions</label>
+              <input id="imp-count" type="number" value="10" min="1" max="40" style="flex:0 0 76px;width:auto">
+              <button class="mini" id="imp-material" onclick="impAI('material')">Write questions from this text</button>
+            </div>
+            <div id="imp-progress" class="progress" role="status" aria-live="polite"></div>
+          </section>
+
+          <section class="panel">
+            <h2>Generate questions</h2>
+            <div class="gen-row">
+              <label class="gen-field topic">Topic
+                <input id="gen-topic" placeholder="e.g. 90s music">
+              </label>
+              <label class="gen-field count">Count
+                <input id="gen-count" type="number" value="10" min="1" max="40">
+              </label>
+              <button class="mini primary" onclick="startGenerate()">Generate</button>
+            </div>
+            <div id="gen-progress" class="progress"></div>
+          </section>
+
+          <!-- AI settings. Collapsed by default. -->
+          <details class="panel llm-panel" id="llm-settings">
+            <summary class="llm-summary">
+              <span class="llm-title">AI settings</span>
+              <span class="llm-summary-line" id="llm-summary">not loaded</span>
+            </summary>
+            <div class="llm-body">
+              <p class="small-muted llm-note">The admin token is required to read or change AI settings. It's kept in this page only, so you re-enter it after a reload.</p>
+              <p class="small-muted llm-note">DeepSeek is the default provider and needs an API key from platform.deepseek.com. Without a key you can still paste in or import questions.</p>
+
+              <div class="llm-field">
+                <label for="llm-admin-token">Admin token</label>
+                <input id="llm-admin-token" type="password" autocomplete="off" placeholder="TRIVIA_ADMIN_TOKEN" spellcheck="false">
+              </div>
+
+              <div class="llm-field">
+                <label for="llm-provider">Provider <span class="llm-source" id="llm-src-provider"></span></label>
+                <select id="llm-provider"></select>
+              </div>
+
+              <div class="llm-field">
+                <label for="llm-base">Base URL <span class="llm-source" id="llm-src-base"></span></label>
+                <input id="llm-base" type="url" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://api.deepseek.com">
+              </div>
+
+              <div class="llm-field">
+                <label for="llm-model">Model <span class="llm-source" id="llm-src-model"></span></label>
+                <input id="llm-model" list="llm-model-list" autocomplete="off" spellcheck="false" placeholder="model id, e.g. deepseek-flash">
+                <datalist id="llm-model-list"></datalist>
+              </div>
+
+              <div class="llm-field">
+                <label for="llm-key">API key <span class="llm-source" id="llm-src-key"></span></label>
+                <input id="llm-key" type="password" autocomplete="new-password" spellcheck="false" placeholder="not set — leave blank to keep">
+              </div>
+
+              <label class="llm-check" for="llm-clear-key">
+                <input id="llm-clear-key" type="checkbox">
+                <span>Clear stored key</span>
+              </label>
+
+              <div class="llm-actions">
+                <button type="button" class="mini" id="llm-detect">Detect models</button>
+                <button type="button" class="mini" id="llm-test">Test connection</button>
+                <button type="button" class="mini primary" id="llm-save">Save</button>
+              </div>
+
+              <div id="llm-status" class="llm-status" role="status" aria-live="polite"></div>
+            </div>
+          </details>
+        </div>
+
+        <section class="panel console-side">
+          <h2>Squads and scores</h2>
+          <div id="team-list"></div>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <!-- ad-lib modal -->
+  <div id="adlib-modal" class="modal-backdrop hidden">
+    <div class="modal">
+      <h2>Ad-lib a question</h2>
+      <label for="ad-stem">Question text</label>
+      <textarea id="ad-stem" rows="2"></textarea>
+      <label for="ad-answer">Correct answer</label>
+      <input id="ad-answer">
+      <label for="ad-options">Options (comma-separated, multiple-choice; leave blank for typed)</label>
+      <input id="ad-options" placeholder="A, B, C, D">
+      <label for="ad-points">Points</label>
+      <input id="ad-points" type="number" value="10">
+      <div class="modal-actions">
+        <button class="mini primary" onclick="submitAdlib()">Start question ⏎</button>
+        <button class="mini" onclick="closeAdlib()">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- set points modal -->
+  <div id="pts-modal" class="modal-backdrop hidden">
+    <div class="modal">
+      <h2>Question point value</h2>
+      <label for="pts-value">Points</label>
+      <input id="pts-value" type="number" value="10">
+      <div class="modal-actions">
+        <button class="mini primary" onclick="submitPoints()">Set</button>
+        <button class="mini" onclick="document.getElementById('pts-modal').classList.add('hidden')">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+const TOKEN_KEY = "tk_host_token", GAME_KEY = "tk_game_id", HOSTS_KEY = "tk_hosts";
+const STATE_LABELS = {lobby: "In the lobby", question: "Question live", revealed: "Answer revealed",
+  round_end: "Round over", final: "Final standings", finished: "Finished"};
+const FORWARD_BUTTON = {lobby: "btn-start", question: "btn-reveal", revealed: "btn-next",
+  round_end: "btn-next-round", final: "btn-finish"};
+let state = null, lastCode = null;
+let adminToken = "";          // page-session only; never stored
+let libraryRounds = [];       // GET /api/library/rounds cache
+
+function $(id){ return document.getElementById(id); }
+
+function loadHosts(){ try { return JSON.parse(localStorage.getItem(HOSTS_KEY) || "{}"); } catch(e){ return {}; } }
+function saveHosts(h){ try { localStorage.setItem(HOSTS_KEY, JSON.stringify(h)); } catch(e){} }
+function adminHeaders(){ return {"X-Admin-Token": adminToken}; }
+
+async function api(path, body, method, headers){
+  const opt = {method: method || (body ? "POST" : "GET"),
+    headers: Object.assign({"Content-Type": "application/json"}, headers || {})};
+  if (body) opt.body = JSON.stringify(body);
+  const r = await fetch(path, opt);
+  return r.json();
+}
+
+async function createGame(){
+  const res = await api("/api/game/create", {name: "Trivia Night"}, null, adminHeaders());
+  if (res.error) { alert(res.error); return; }
+  enterGame(res.game_id, res.host_token, {name: res.name, code: res.code});
+}
+
+async function joinGame(){
+  const gid = parseInt($("join-game-id").value, 10);
+  const tok = $("join-token").value.trim();
+  if (gid && tok) enterGame(gid, tok, null);
+}
+
+function enterGame(gid, token, meta){
+  localStorage.setItem(GAME_KEY, gid);
+  localStorage.setItem(TOKEN_KEY, token);
+  // Store the token per game so selecting one game never clobbers another's.
+  const h = loadHosts();
+  const prev = h[gid] || {};
+  h[gid] = {host_token: token,
+            name: (meta && meta.name) || prev.name || "",
+            code: (meta && meta.code) || prev.code || ""};
+  saveHosts(h);
+  $("gate").classList.add("hidden");
+  $("main").classList.remove("hidden");
+  $("gid").textContent = gid;
+  $("stage-link").href = `/stage#g=${gid}&t=${encodeURIComponent(token)}`;
+  // Remember the credentials this page session is actually using (joinGame()
+  // does not persist to localStorage) so the settings panel talks to the game
+  // the host just entered. Session-only; never written to storage.
+  llmActiveGame = gid;
+  llmActiveToken = token;
+  llmLoaded = false;
+  poll();
+  loadSettings();
+}
+
+function gameId(){ return parseInt(localStorage.getItem(GAME_KEY), 10); }
+function hostToken(){ return localStorage.getItem(TOKEN_KEY) || ""; }
+
+// Back from a game to the start screen (game list, round library). The game
+// stays remembered, so the host can return to it without rotating its token.
+function showGate(){
+  $("main").classList.add("hidden");
+  $("gate").classList.remove("hidden");
+  const gid = gameId(), btn = $("gate-resume");
+  if (gid && hostToken()) {
+    const meta = loadHosts()[gid] || {};
+    btn.textContent = `Back to game #${gid}` + (meta.code ? ` (${meta.code})` : "");
+    btn.classList.remove("hidden");
+  } else {
+    btn.classList.add("hidden");
+  }
+  refreshManagement();
+  window.scrollTo(0, 0);
+}
+
+function resumeGame(){
+  const gid = gameId();
+  if (gid && hostToken()) enterGame(gid, hostToken(), null);
+}
+
+function forgetCurrentGame(){
+  localStorage.removeItem(GAME_KEY);
+  localStorage.removeItem(TOKEN_KEY);
+  $("gate-resume").classList.add("hidden");
+}
+
+function fmtTime(epochSeconds){
+  if (!epochSeconds) return "";
+  const d = new Date(epochSeconds * 1000);
+  const opts = {month: "short", day: "numeric", hour: "numeric", minute: "2-digit"};
+  if (d.getFullYear() !== new Date().getFullYear()) opts.year = "numeric";
+  return d.toLocaleString(undefined, opts);
+}
+
+// ---------------- management (admin-token gated) ----------------
+async function refreshManagement(){
+  if (!adminToken.trim()) { $("prev-games").classList.add("hidden"); return; }
+  const res = await api("/api/games", null, "GET", adminHeaders());
+  if (res.error) { $("gate-status").textContent = res.error; return; }
+  $("gate-status").textContent = "";
+  // The token just worked: hand it to the AI settings panel too, so the host
+  // types it once per page session instead of twice.
+  const llmTok = $("llm-admin-token");
+  if (!llmTok.value) { llmTok.value = adminToken; llmTok.dispatchEvent(new Event("input")); }
+  renderPrevGames(res.games || []);
+  loadLibrary();
+}
+
+function renderPrevGames(games){
+  const wrap = $("prev-games");
+  if (!games.length) { wrap.classList.add("hidden"); $("prev-games-list").innerHTML = ""; return; }
+  wrap.classList.remove("hidden");
+  const h = loadHosts();
+  $("prev-games-list").innerHTML = games.map(g => {
+    const haveToken = !!(h[g.id] && h[g.id].host_token);
+    const when = `created ${fmtTime(g.created_at)}` +
+      (g.last_active_at ? ` · last played ${fmtTime(g.last_active_at)}` : "");
+    return `<div class="team-row game-row">
+      <span>${esc(g.name)} <span class="small-muted">#${g.id} · ${esc(g.code)} · ${esc(g.state)} · ${g.round_count} round${g.round_count === 1 ? "" : "s"}</span>
+        <span class="small-muted game-when">${esc(when)}</span></span>
+      <div class="adjust game-actions">
+        <button onclick="selectGame(${g.id})">${haveToken ? "Select (rotate)" : "Select"}</button>
+        <button onclick="deleteGame(${g.id})">Delete</button>
+      </div>
+    </div>`;
+  }).join("");
+}
+
+async function selectGame(gid){
+  if (!confirm("Selecting this game rotates its host token — the previous host token will stop working. Continue?")) return;
+  const res = await api("/api/game/select", {game_id: gid}, null, adminHeaders());
+  if (res.error) { alert(res.error); return; }
+  enterGame(res.game_id, res.host_token, {name: res.name, code: res.code});
+}
+
+async function deleteGame(gid){
+  if (!confirm("Delete game #" + gid + "? This removes its teams, scores, questions and rounds. Saved library rounds are kept.")) return;
+  const res = await api("/api/game/delete", {game_id: gid, confirm: true}, null, adminHeaders());
+  if (res.error) { alert(res.error); return; }
+  const h = loadHosts();
+  delete h[gid];
+  saveHosts(h);
+  if (gid === gameId()) forgetCurrentGame();
+  refreshManagement();
+}
+
+async function loadLibrary(headers){
+  const res = await api("/api/library/rounds", null, "GET", headers || adminHeaders());
+  if (res.error) return;
+  libraryRounds = res.rounds || [];
+  refreshLibrarySelects();
+}
+
+function libOptionsHtml(){
+  return libraryRounds.length
+    ? libraryRounds.map(l => `<option value="${l.id}">${esc(l.category)} (${l.question_count} questions)</option>`).join("")
+    : `<option value="">no saved library rounds yet</option>`;
+}
+
+// Refresh only the library <select>s, keeping each one's current pick, so a
+// reload of the library never wipes the rounds the host is part-way through setting up.
+function refreshLibrarySelects(){
+  document.querySelectorAll("select[id^='round-lib-']").forEach(sel => {
+    const keep = sel.value;
+    sel.innerHTML = libOptionsHtml();
+    if (keep && Array.from(sel.options).some(o => o.value === keep)) sel.value = keep;
+  });
+}
+
+function roundModeChanged(i){
+  const mode = $("round-mode-" + i).value;
+  $("round-category-" + i).classList.toggle("hidden", mode !== "category");
+  $("round-count-q-" + i).classList.toggle("hidden", mode !== "category");
+  $("round-lib-" + i).classList.toggle("hidden", mode !== "library");
+}
+
+function renderRoundPickers(){
+  const n = parseInt($("round-count").value, 10) || 1;
+  const libOpts = libOptionsHtml();
+  let html = "";
+  for (let i = 1; i <= n; i++) {
+    html += `<div class="round-row">
+      <span class="round-num">${i}</span>
+      <select id="round-mode-${i}" class="round-mode" aria-label="Round ${i} source" onchange="roundModeChanged(${i})">
+        <option value="category">Category</option>
+        <option value="library">Library</option>
+      </select>
+      <input id="round-category-${i}" class="round-pick" aria-label="Round ${i} category" placeholder="Category, e.g. 90s music">
+      <input id="round-count-q-${i}" class="round-qs" type="number" value="10" min="1" max="40" aria-label="Round ${i} question count" title="Question count">
+      <select id="round-lib-${i}" class="round-pick hidden" aria-label="Round ${i} library round">${libOpts}</select>
+    </div>`;
+  }
+  $("round-config").innerHTML = html;
+}
+
+async function configure(){
+  const n = parseInt($("round-count").value, 10) || 1;
+  const rounds = [];
+  for (let i = 1; i <= n; i++) {
+    const mode = $("round-mode-" + i).value;
+    if (mode === "library") {
+      const lid = parseInt($("round-lib-" + i).value, 10);
+      if (lid) rounds.push({library_round_id: lid});
+      else { alert("Round " + i + ": pick a library round"); return; }
+    } else {
+      const cat = $("round-category-" + i).value.trim();
+      const qc = parseInt($("round-count-q-" + i).value, 10) || 10;
+      if (!cat) { alert("Round " + i + ": enter a category"); return; }
+      rounds.push({category: cat, question_count: qc});
+    }
+  }
+  const gid = gameId();
+  // After a reload the unlock token is gone; use any token entered on this page.
+  const res = await api("/api/game/configure", {game_id: gid, rounds}, null, impAuth() || adminHeaders());
+  if (res.error) { alert(res.error + (res.errors ? "\n" + res.errors.join("\n") : "")); return; }
+  $("round-progress").textContent = "configured — building rounds…";
+  poll();
+}
+
+async function poll(){
+  const gid = gameId();
+  if (!gid) return;
+  try {
+    const s = await api(`/api/state?game_id=${gid}&role=host`, null, "GET", {"X-Token": hostToken()});
+    if (s && s.error) { $("gate").classList.remove("hidden"); $("main").classList.add("hidden"); return; }
+    render(s);
+  } catch(e) { /* offline — retry next tick */ }
+}
+
+// Replace a list only when it changed, so a poll can't swallow a tap on its buttons.
+function setList(el, html){
+  if (el.dataset.html === html) return;
+  el.dataset.html = html;
+  el.innerHTML = html;
+}
+
+function render(s){
+  state = s;
+  $("code").textContent = s.code;
+  const st = s.state;
+  $("state-label").textContent = STATE_LABELS[st] || st;
+  const roundsArr = s.rounds || [];
+  const r1 = roundsArr.find(r => r.position === 1);
+  const round1Ready = !r1 || r1.status === "ready";
+  $("btn-start").disabled = st !== "lobby" || !round1Ready;
+  $("btn-reveal").disabled = st !== "question";
+  $("btn-next").disabled = !(st === "revealed" || st === "question");
+  $("btn-skip").disabled = !(st === "question" || st === "revealed");
+  $("btn-void").disabled = !(st === "question" || st === "revealed");
+  $("btn-next-round").disabled = st !== "round_end";
+  $("btn-finish").disabled = st !== "final";
+  // Gold marks whatever the space bar would do next.
+  document.querySelectorAll(".bar button").forEach(b => b.classList.toggle("primary", b.id === FORWARD_BUTTON[st]));
+
+  // clock
+  $("clock-readout").textContent = s.clock_running ? (s.clock_remaining + "s") : "Stopped";
+
+  // question
+  const q = s.question;
+  if (q) {
+    $("q-pos").textContent = `Question ${q.position}`;
+    $("q-stem").textContent = q.stem;
+    $("q-points-label").textContent = `${q.points} points`;
+    setList($("q-opts"), (q.options||[]).map((o,i)=>`<div>${optionLetter(i)}. ${esc(o)}</div>`).join(""));
+    $("answered-count").textContent = `${s.answered_count} of ${s.teams.length} squads reported`;
+    // peek: answer only in JS memory, injected on hold
+    const peek = $("peek");
+    peek.dataset.answer = q.answer || "";
+    if (peek.classList.contains("holding")) peek.textContent = peek.dataset.answer || "(no answer)";
+    else peek.textContent = "Hold to peek answer";
+  } else {
+    $("q-pos").textContent = "No question live";
+    $("q-points-label").textContent = "";
+    $("q-stem").textContent = st === "lobby" ? "Set up rounds or generate questions, then press Start." : "—";
+    setList($("q-opts"), "");
+    $("answered-count").textContent = "";
+  }
+
+  // teams + scores
+  setList($("team-list"), s.teams.map(t => `
+    <div class="team-row">
+      ${guidon(t.color_index, 40)}
+      <span class="team-name">${esc(t.name)}<span class="team-pin" title="Rejoin PIN">PIN ${esc(t.rejoin_pin || "—")}</span></span>
+      <span class="score-pill">${t.total}</span>
+      <div class="adjust">
+        <button aria-label="Add 1 to ${esc(t.name)}" onclick="award(${t.id},1)">+1</button>
+        <button aria-label="Add 5 to ${esc(t.name)}" onclick="award(${t.id},5)">+5</button>
+        <button aria-label="Add 10 to ${esc(t.name)}" onclick="award(${t.id},10)">+10</button>
+        <button aria-label="Take 5 from ${esc(t.name)}" onclick="award(${t.id},-5)">−5</button>
+      </div>
+    </div>`).join(""));
+
+  // rounds progress / status (per-round, from /api/state)
+  setList($("round-progress"), roundsArr.map(r => {
+    const cls = r.status === "ready" ? "ok" : (r.status === "failed" ? "bad" : "");
+    const label = r.category ? esc(r.category) : ("Round " + r.position);
+    const err = r.error ? " · " + esc(r.error) : "";
+    return `<div class="${cls}">Round ${r.position} · ${label} · ${esc(r.status)} (${r.question_count} questions)${err}</div>`;
+  }).join(""));
+
+  // judging
+  if (s.judging && s.judging.length) {
+    $("judge-panel").classList.remove("hidden");
+    setList($("judge-list"), s.judging.map((j,i)=>`
+      <div class="judge-row">
+        <span class="judge-team">${i+1}. ${esc(j.name)}</span>
+        <span class="judge-answer">${esc(j.answer || "— no answer —")}</span>
+        <button class="yes" onclick="award(${j.team_id}, ${s.question.points}, 'judged')">✓ ${j.suggested_correct?"Matches":"Right"}</button>
+        <button class="no" onclick="award(${j.team_id}, 0, 'judged_wrong')">✗ Wrong</button>
+      </div>`).join(""));
+  } else {
+    $("judge-panel").classList.add("hidden");
+  }
+}
+
+// Escapes quotes too: several call sites interpolate into attribute values.
+function esc(x){ return String(x ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;"); }
+
+async function act(action, params){
+  const gid = gameId();
+  const r = await api("/api/action", {game_id: gid, token: hostToken(), action, params: params||{}});
+  if (r && r.error) alert(r.error);
+  poll();
+}
+
+async function award(teamId, delta, reason){
+  act("award", {team_id: teamId, delta, reason: reason || "manual"});
+}
+
+function openAdlib(){ $("adlib-modal").classList.remove("hidden"); $("ad-stem").focus(); }
+function closeAdlib(){ $("adlib-modal").classList.add("hidden"); }
+async function submitAdlib(){
+  const stem = $("ad-stem").value.trim();
+  const answer = $("ad-answer").value.trim();
+  const optsRaw = $("ad-options").value.trim();
+  const points = parseInt($("ad-points").value, 10) || 10;
+  if (!stem || !answer) { alert("Question text and answer are required"); return; }
+  let options = null, type = "text";
+  if (optsRaw) { options = optsRaw.split(",").map(s=>s.trim()).filter(Boolean); type = "mc"; }
+  await act("adlib", {stem, answer, options, points, type});
+  closeAdlib();
+}
+
+function openSetPoints(){ $("pts-modal").classList.remove("hidden"); }
+async function submitPoints(){
+  const p = parseInt($("pts-value").value, 10) || 10;
+  await act("set_points", {points: p});
+  $("pts-modal").classList.add("hidden");
+}
+
+async function startGenerate(){
+  const topic = $("gen-topic").value.trim();
+  const count = parseInt($("gen-count").value, 10) || 10;
+  if (!topic) { alert("Topic required"); return; }
+  const gid = gameId();
+  const r = await api("/api/generate", {game_id: gid, token: hostToken(), topic, count});
+  watchGen(r.job_id);
+}
+
+async function watchGen(jobId){
+  $("gen-progress").textContent = "generating…";
+  const gid = gameId();
+  const iv = setInterval(async () => {
+    const st = await api(`/api/generate/status?job_id=${jobId}&game_id=${gid}`, null, "GET", {"X-Token": hostToken()});
+    if (!st) { clearInterval(iv); return; }
+    if (st.done) {
+      clearInterval(iv);
+      const missing = Math.max(0, (st.count || st.accepted) - st.accepted);
+      $("gen-progress").textContent = st.error
+        ? ("generation failed: " + st.error)
+        : (missing > 0
+            ? `done — ${st.accepted} accepted, ${st.rejected} rejected, ${missing} short`
+            : `done — ${st.accepted} accepted, ${st.rejected} rejected`);
+      poll();
+    } else {
+      $("gen-progress").textContent = "generating… (working in background)";
+    }
+  }, 1500);
+}
+
+// Peek: press-and-hold reveals the answer, release hides it.
+(function(){
+  const el = $("peek");
+  const hide = ()=>{ el.textContent = "Hold to peek answer"; el.classList.remove("holding"); };
+  el.addEventListener("pointerdown", ()=>{ el.textContent = el.dataset.answer || "(no answer)"; el.classList.add("holding"); });
+  el.addEventListener("pointerup", hide);
+  el.addEventListener("pointerleave", hide);
+  el.addEventListener("pointercancel", hide);
+})();
+
+// Keyboard shortcuts (Appendix A): Space/R/S/U/C/? aliases for buttons.
+document.addEventListener("keydown", (e)=>{
+  if (e.target.matches("input,textarea,select")) return;
+  const k = e.key.toLowerCase();
+  if (k === " "){ e.preventDefault(); forwardAction(); }
+  else if (k === "r") act("reveal");
+  else if (k === "s") act("skip");
+  else if (k === "u") act("undo");
+  else if (k === "c"){ state && state.clock_running ? act("pause_clock") : act("start_clock"); }
+  else if (k === "?"){ e.preventDefault(); openAdlib(); }
+  else if (k >= "1" && k <= "8"){ judgeByKey(parseInt(k,10)); }
+});
+function forwardAction(){
+  const st = state && state.state;
+  if (st === "lobby") act("start");
+  else if (st === "question") act("reveal");
+  else if (st === "revealed") act("next");
+  else if (st === "round_end") act("next_round");
+  else if (st === "final") act("finish");
+}
+function judgeByKey(n){
+  if (state && state.judging && state.judging[n-1]) {
+    const j = state.judging[n-1];
+    award(j.team_id, state.question.points, "judged");
+  }
+}
+
+// ---------------- AI settings ----------------
+// The admin token lives in this module-scope variable for the page
+// session only. It is never put in localStorage/sessionStorage, never in a URL,
+// never in a data-* attribute, and never written back into an input's value.
+// Every settings request carries it as the X-Admin-Token header.
+let llmAdminToken = "";
+let llmLocked = false;      // true after a 403 "settings locked" until a token is typed
+let llmLoaded = false;
+let llmBusy = false;
+let llmActiveGame = null;   // set by enterGame(); survives joinGame() without storage
+let llmActiveToken = null;
+let llmBaseline = null;     // last server-confirmed values — "only changed fields"
+let llmPrevPresetBase = "";
+let llmPresets = [];
+let llmLoadSeq = 0;         // drops stale GET responses when a load is superseded
+let llmTokenTimer = null;   // debounce so a half-typed token is never sent
+
+const LLM_LOCK_MSG = "settings locked: set TRIVIA_ADMIN_TOKEN";
+const LLM_BUTTONS = ["llm-detect", "llm-test", "llm-save"];
+
+function llmStatus(text, kind){
+  const el = $("llm-status");
+  el.textContent = text || "";
+  el.classList.remove("ok", "bad");
+  if (kind) el.classList.add(kind);
+}
+
+// Server source values: "env" | "db" | "default".
+function srcLabel(v){
+  if (v === "env") return "from env";
+  if (v === "db") return "from console";
+  if (v === "default") return "default";
+  return "";
+}
+
+function findPreset(id){
+  for (let i = 0; i < llmPresets.length; i++) {
+    const p = llmPresets[i];
+    if (p && String(p.id) === String(id)) return p;
+  }
+  return null;
+}
+
+function presetLabel(id){
+  const p = findPreset(id);
+  return p && p.label ? String(p.label) : "";
+}
+
+function applyLlmDisabled(){
+  for (const id of LLM_BUTTONS) $(id).disabled = llmBusy || llmLocked;
+}
+
+// Thin fetch wrapper: returns {status, data} so 400/403 bodies can be shown.
+// Never logs the key or the admin token.
+async function llmApi(path, body, method, headers){
+  const opt = {method: method || (body ? "POST" : "GET"),
+               headers: Object.assign({"Content-Type": "application/json"}, headers || {})};
+  opt.headers["X-Admin-Token"] = llmAdminToken;
+  if (body) opt.body = JSON.stringify(body);
+  let r;
+  try {
+    r = await fetch(path, opt);
+  } catch (e) {
+    return {status: 0, data: {error: "could not reach server"}};
+  }
+  let data = {};
+  try { data = await r.json(); } catch (e) { data = {error: "server returned " + r.status}; }
+  return {status: r.status, data: data || {}};
+}
+
+function llmCreds(){
+  const gid = (llmActiveGame != null) ? llmActiveGame : gameId();
+  const tok = (llmActiveToken != null) ? llmActiveToken : hostToken();
+  return {game_id: gid, token: tok || ""};
+}
+
+function llmErrText(data, fallback){
+  if (data && Array.isArray(data.errors) && data.errors.length) {
+    return data.errors.map(x => String(x)).join(" · ");
+  }
+  if (data && typeof data.error === "string" && data.error) return data.error;
+  return fallback;
+}
+
+function llmHandle403(data){
+  llmLocked = true;
+  llmStatus((data && data.error) ? String(data.error) : LLM_LOCK_MSG, "bad");
+  applyLlmDisabled();
+}
+
+function setKeyPlaceholder(isSet){
+  $("llm-key").placeholder = isSet ? "•••• stored" : "not set — leave blank to keep";
+}
+
+function applyModelHint(){
+  const p = findPreset($("llm-provider").value);
+  $("llm-model").placeholder = (p && p.model_hint)
+    ? String(p.model_hint)
+    : "model id, e.g. deepseek-flash";
+}
+
+function updateSummary(d){
+  const src = (d && d.source) || {};
+  const model = (d && d.model) ? String(d.model) : "—";
+  const label = presetLabel(d && d.provider);
+  const providerText = label ? label.toLowerCase() : String((d && d.provider) || "custom");
+  const sourceText = srcLabel(src.model) || "default";
+  $("llm-summary").textContent = [model, providerText, sourceText].join(" · ");
+}
+
+// Populate the panel from a GET/POST response body (same shape for both).
+function applySettings(d){
+  if (!d || typeof d !== "object") { llmStatus("unexpected settings response", "bad"); return; }
+  llmPresets = Array.isArray(d.presets) ? d.presets : [];
+
+  const sel = $("llm-provider");
+  const provider = d.provider || (d.defaults && d.defaults.provider) || "";
+  const seen = {};
+  sel.replaceChildren();
+  for (const p of llmPresets) {
+    if (!p || !p.id) continue;
+    const o = document.createElement("option");
+    o.value = String(p.id);
+    o.textContent = String(p.label || p.id);
+    sel.appendChild(o);
+    seen[o.value] = true;
+  }
+  if (provider && !seen[String(provider)]) {
+    const o = document.createElement("option");
+    o.value = String(provider);
+    o.textContent = String(provider);
+    sel.appendChild(o);
+  }
+  if (!sel.options.length) {
+    const o = document.createElement("option");
+    o.value = "custom";
+    o.textContent = "Custom";
+    sel.appendChild(o);
+  }
+  sel.value = String(provider || sel.options[0].value);
+
+  $("llm-base").value = d.base_url || "";
+  $("llm-model").value = d.model || "";
+
+  const src = d.source || {};
+  $("llm-src-provider").textContent = srcLabel(src.provider);
+  $("llm-src-base").textContent = srcLabel(src.base_url);
+  $("llm-src-model").textContent = srcLabel(src.model);
+  $("llm-src-key").textContent = srcLabel(src.api_key);
+
+  setKeyPlaceholder(!!d.api_key_set);
+  llmBaseline = {provider: String(d.provider || ""),
+                 base_url: String(d.base_url || ""),
+                 model: String(d.model || "")};
+  llmPrevPresetBase = (findPreset(sel.value) || {}).base_url || "";
+  updateSummary(d);
+  applyModelHint();
+}
+
+async function loadSettings(){
+  const c = llmCreds();
+  if (!c.game_id) { llmStatus("join a game to load settings"); return; }
+  const seq = ++llmLoadSeq;
+  const q = "/api/settings?game_id=" + encodeURIComponent(c.game_id);
+  const res = await llmApi(q, null, "GET", {"X-Token": c.token});
+  if (seq !== llmLoadSeq) return;  // a newer load superseded this one
+  if (res.status === 403) { llmHandle403(res.data); return; }
+  if (res.status !== 200) {
+    llmStatus(llmErrText(res.data, "could not load settings"), "bad");
+    return;
+  }
+  applySettings(res.data);
+  llmLoaded = true;
+  llmStatus("");  // drop any earlier "locked" message now that config is shown
+}
+
+// The draft the host currently sees; the key is included only when typed.
+function llmDraft(){
+  const c = llmCreds();
+  const body = {game_id: c.game_id, token: c.token,
+                provider: $("llm-provider").value,
+                base_url: $("llm-base").value.trim(),
+                model: $("llm-model").value.trim()};
+  const key = $("llm-key").value;
+  if (key) body.api_key = key;
+  return body;
+}
+
+// Model ids go in as <option> nodes — never innerHTML / string interpolation.
+function fillModelList(models){
+  const dl = $("llm-model-list");
+  dl.replaceChildren();
+  for (const id of models) {
+    if (typeof id !== "string" || !id) continue;
+    const o = document.createElement("option");
+    o.value = id;
+    dl.appendChild(o);
+  }
+}
+
+async function runLlmTest(){
+  if (llmBusy || llmLocked) return;
+  llmBusy = true;
+  applyLlmDisabled();
+  llmStatus("testing…");
+  try {
+    const res = await llmApi("/api/settings/test", llmDraft(), "POST");
+    if (res.status === 403) { llmHandle403(res.data); return; }
+    const d = res.data || {};
+    if (d.key_required_for_new_host) {
+      llmStatus("enter the API key to test a different host", "bad");
+      return;
+    }
+    if (res.status !== 200 || d.ok !== true) {
+      llmStatus(llmErrText(d, "test failed"), "bad");
+      return;
+    }
+    const models = Array.isArray(d.models) ? d.models : [];
+    fillModelList(models);
+    const ms = (typeof d.latency_ms === "number") ? d.latency_ms : "?";
+    llmStatus("ok — " + models.length + " models, " + ms + " ms", "ok");
+  } catch (e) {
+    llmStatus("test failed", "bad");
+  } finally {
+    llmBusy = false;
+    applyLlmDisabled();
+  }
+}
+
+async function saveLlmSettings(){
+  if (llmBusy || llmLocked) return;
+  const draft = llmDraft();
+  const body = {game_id: draft.game_id, token: draft.token};
+  const base = llmBaseline || {provider: "", base_url: "", model: ""};
+  if (draft.provider !== base.provider) body.provider = draft.provider;
+  if (draft.base_url !== base.base_url) body.base_url = draft.base_url;
+  if (draft.model !== base.model) body.model = draft.model;
+  if (draft.api_key) body.api_key = draft.api_key;
+  if ($("llm-clear-key").checked) body.clear_api_key = true;
+
+  llmBusy = true;
+  applyLlmDisabled();
+  llmStatus("saving…");
+  try {
+    const res = await llmApi("/api/settings", body, "POST");
+    if (res.status === 403) { llmHandle403(res.data); return; }
+    if (res.status === 200) {
+      applySettings(res.data);
+      llmLoaded = true;
+      $("llm-key").value = "";
+      $("llm-clear-key").checked = false;
+      llmStatus("saved", "ok");
+      poll();
+    } else {
+      llmStatus(llmErrText(res.data, "save failed"), "bad");
+    }
+  } catch (e) {
+    llmStatus("save failed", "bad");
+  } finally {
+    llmBusy = false;
+    applyLlmDisabled();
+  }
+}
+
+(function initLlmPanel(){
+  const tokenEl = $("llm-admin-token");
+  tokenEl.addEventListener("input", function(){
+    llmAdminToken = tokenEl.value;
+    if (llmAdminToken.trim() && llmLocked) {
+      llmLocked = false;
+      applyLlmDisabled();
+    }
+    // Debounce: never fire a settings GET with a half-typed token. Typing
+    // pauses for 500 ms → one request with the complete token.
+    if (llmTokenTimer) { clearTimeout(llmTokenTimer); llmTokenTimer = null; }
+    if (llmAdminToken.trim() && !llmLoaded && !llmBusy) {
+      llmTokenTimer = setTimeout(function(){
+        llmTokenTimer = null;
+        if (!llmLoaded) loadSettings();
+      }, 500);
+    }
+  });
+
+  $("llm-provider").addEventListener("change", function(){
+    const prev = llmPrevPresetBase;
+    const p = findPreset(this.value);
+    const baseEl = $("llm-base");
+    const cur = baseEl.value.trim();
+    // Pre-fill only when empty or still the previous preset's URL — a
+    // hand-edited base URL is never clobbered.
+    if (p && p.base_url && (cur === "" || cur === prev)) baseEl.value = String(p.base_url);
+    llmPrevPresetBase = (p && p.base_url) ? String(p.base_url) : "";
+    applyModelHint();
+  });
+
+  $("llm-detect").addEventListener("click", runLlmTest);
+  $("llm-test").addEventListener("click", runLlmTest);
+  $("llm-save").addEventListener("click", saveLlmSettings);
+
+  // First open loads settings; enterGame() also triggers a load.
+  $("llm-settings").addEventListener("toggle", function(){
+    if (this.open && !llmLoaded && !llmBusy) loadSettings();
+  });
+
+  applyLlmDisabled();
+})();
+
+// ---------------- import questions (/api/import/*) ----------------
+// Uses whichever admin token is on hand: the unlock screen's, the AI settings
+// panel's, or one typed into this panel. Page-session only, like the others.
+const IMP_MAX_FILE = 200 * 1024, IMP_MAX_BODY = 256 * 1024;
+const IMP_FORMATS = {json: "JSON", lettered: "lettered choices", tagged: "Q: / A: blocks",
+  tsv: "tab-separated (Quizlet / spreadsheet)", csv: "comma-separated (CSV)",
+  lines: "one per line", none: "nothing"};
+const IMP_STATUS = {complete: "ready", needs_answer: "needs answer", needs_question: "needs question"};
+const IMP_REASONS = {
+  "confidence:low": "the AI wasn't sure of the answer",
+  "answer:leak_in_stem": "the question gave away the answer",
+  "answer:not_in_choices_exactly_once": "the answer wasn't among the choices",
+  "duplicate:near": "too similar to another question",
+  "volatile:no_year_anchor": "depends on the current date",
+  "reply:missing": "the AI skipped it",
+  "time_budget": "ran out of time",
+};
+let impTimer = null, impPolling = false, impToken = "";
+
+function impAuth(){
+  const t = (adminToken || llmAdminToken || impToken || "").trim();
+  return t ? {"X-Admin-Token": t} : null;
+}
+
+function impMsg(html, kind){
+  const el = $("imp-progress");
+  el.innerHTML = kind ? `<div class="${kind}">${html}</div>` : html;
+}
+
+function impNeedToken(){
+  $("imp-token-row").classList.remove("hidden");
+  impMsg("Enter the admin token (TRIVIA_ADMIN_TOKEN) above to import questions.", "bad");
+  $("imp-token").focus();
+}
+
+async function impApi(path, body, method){
+  const auth = impAuth();
+  if (!auth) { impNeedToken(); return null; }
+  const payload = body ? JSON.stringify(body) : undefined;
+  if (payload && new TextEncoder().encode(payload).length > IMP_MAX_BODY) {
+    return {error: "That is too much text to send at once (limit 256 KB). Split it into smaller imports."};
+  }
+  try {
+    const r = await fetch(path, {method: method || (body ? "POST" : "GET"),
+      headers: Object.assign({"Content-Type": "application/json"}, auth), body: payload});
+    let data = {};
+    try { data = await r.json(); } catch (e) { data = {error: "server returned " + r.status}; }
+    data._status = r.status;
+    return data;
+  } catch (e) {
+    return {error: "could not reach the server"};
+  }
+}
+
+function impPayload(){
+  return {text: $("imp-text").value, category: $("imp-name").value.trim(), swap: $("imp-swap").checked};
+}
+
+function impBusy(on){
+  ["imp-preview", "imp-save", "imp-fill", "imp-material"].forEach(id => { $(id).disabled = on; });
+}
+
+// The preview and the Save label describe the text as it was; editing makes both stale.
+function impStale(){
+  $("imp-preview-out").innerHTML = "";
+  $("imp-save").textContent = "Save as round";
+}
+
+function impErrors(errs){
+  if (!errs || !errs.length) return "";
+  return `<div class="bad">${errs.map(e =>
+    esc((e.line ? "Line " + e.line + ": " : "") + e.message)).join("<br>")}</div>`;
+}
+
+function impRows(rows){
+  const body = rows.slice(0, 50).map((q, i) => {
+    const kind = q.type === "mc" ? (q.options.length + " options") : (q.type === "numeric" ? "number" : "typed");
+    return `<tr><td>${i + 1}</td><td>${esc(q.stem || "—")}</td><td>${esc(q.answer || "—")}</td>
+      <td>${esc(kind)}</td><td class="${q.status === "complete" ? "ok" : "bad"}">${esc(IMP_STATUS[q.status] || q.status)}</td></tr>`;
+  }).join("");
+  const more = rows.length > 50 ? `<div class="small-muted">Showing the first 50 of ${rows.length}.</div>` : "";
+  return `<table class="imp-table"><thead><tr><th>#</th><th>Question</th><th>Answer</th><th>Type</th><th>Status</th></tr></thead><tbody>${body}</tbody></table>${more}`;
+}
+
+async function impPreview(){
+  if (!$("imp-text").value.trim()) { impMsg("Paste some questions or choose a file first.", "bad"); return; }
+  impMsg("");
+  const res = await impApi("/api/import/parse", impPayload());
+  if (!res) return;
+  if (res.error) { impMsg(esc(res.error), "bad"); return; }
+  const c = res.counts;
+  $("imp-save").textContent = c.ready ? `Save ${c.ready} as round` : "Save as round";
+  $("imp-preview-out").innerHTML =
+    `<div>Detected: <b>${esc(IMP_FORMATS[res.format] || res.format)}</b> · ` +
+    `<span class="ok">${c.ready} ready</span> · ${c.needs_answer} need an answer · ${c.needs_question} need a question</div>` +
+    impErrors(res.errors) + (res.questions.length ? impRows(res.questions) : "");
+}
+
+async function impSave(){
+  if (!$("imp-text").value.trim()) { impMsg("Paste some questions or choose a file first.", "bad"); return; }
+  impMsg("");
+  const res = await impApi("/api/import/save", impPayload());
+  if (!res) return;
+  if (res.error) {
+    impMsg(esc(res.error) + (res.errors && res.errors.length ? impErrors(res.errors) : ""), "bad");
+    return;
+  }
+  const rounds = (res.rounds || []).map(r => `“${esc(r.category)}” (${r.question_count} questions)`).join(", ");
+  impMsg(`Saved ${rounds}.` + (res.skipped ? ` ${res.skipped} incomplete row${res.skipped === 1 ? "" : "s"} skipped.` : "") +
+    ` Choose <b>Library</b> in Rounds above to use it.` + impErrors(res.errors), "ok");
+  await loadLibrary(impAuth());
+}
+
+async function impAI(mode){
+  const text = $("imp-text").value;
+  if (!text.trim()) { impMsg("Paste some questions or notes first.", "bad"); return; }
+  const body = Object.assign(impPayload(), {mode});
+  if (mode === "material") body.count = parseInt($("imp-count").value, 10) || 10;
+  const res = await impApi("/api/import/ai", body);
+  if (!res) return;
+  if (res.error) { impMsg(esc(res.error), "bad"); return; }
+  impBusy(true);
+  impMsg("The AI is working… this can take a minute or more. “Save as round” still works without it.");
+  clearInterval(impTimer);
+  impTimer = setInterval(() => impPoll(res.job_id), 1500);
+}
+
+async function impPoll(jobId){
+  if (impPolling) return;
+  impPolling = true;
+  try {
+    const st = await impApi("/api/import/status?job_id=" + encodeURIComponent(jobId), null, "GET");
+    if (!st || (st.error && st._status >= 400)) {
+      clearInterval(impTimer); impBusy(false);
+      if (st) impMsg("Lost track of that AI job: " + esc(st.error) + ". “Save as round” still works.", "bad");
+      return;
+    }
+    if (!st.done) return;  // also rides out a dropped poll: st.error without done
+    clearInterval(impTimer);
+    impBusy(false);
+    impFinish(st);
+    if (st.rounds && st.rounds.length) await loadLibrary(impAuth());
+  } finally {
+    impPolling = false;
+  }
+}
+
+function impFinish(st){
+  const fallback = " “Save as round” still works without AI and saves every ready row.";
+  if (st.error) {
+    const err = String(st.error).replace(/\.\s*$/, "");
+    impMsg("The AI step failed: " + esc(err) + "." + (/without AI/.test(err) ? "" : fallback), "bad");
+    return;
+  }
+  let html = "";
+  if (st.rounds && st.rounds.length) {
+    html += `<div class="ok">${st.accepted} question${st.accepted === 1 ? "" : "s"} saved to ` +
+      st.rounds.map(r => `“${esc(r.category)}” (${r.question_count})`).join(", ") +
+      `. Choose <b>Library</b> in Rounds above to use ${st.rounds.length === 1 ? "it" : "them"}. ` +
+      `AI-written answers are not fact-checked, so skim them first.</div>`;
+  } else {
+    html += `<div class="bad">The AI produced no usable questions.${fallback}</div>`;
+  }
+  if (st.shortfall) html += `<div class="bad">${st.shortfall} fewer than requested.</div>`;
+  if (st.truncated) html += `<div class="small-muted">Only the first 30,000 characters of your text were used.</div>`;
+  if (st.rejected && st.rejected.length) {
+    html += `<div class="small-muted">${st.rejected.length} rejected:</div>` + st.rejected.map(r =>
+      `<div class="bad">${esc(r.stem || r.answer || "(blank)")} — ${esc(IMP_REASONS[r.reason] || r.reason)}</div>`).join("");
+  }
+  impMsg(html);
+}
+
+(function initImport(){
+  $("imp-token").addEventListener("input", function(){ impToken = this.value; });
+  $("imp-text").addEventListener("input", impStale);
+  $("imp-swap").addEventListener("change", impStale);
+  $("imp-file").addEventListener("change", function(){
+    const f = this.files && this.files[0];
+    this.value = "";  // so choosing the same file again still fires
+    if (!f) return;
+    if (f.size > IMP_MAX_FILE) { impMsg("That file is over 200 KB. Split it into smaller files.", "bad"); return; }
+    const rd = new FileReader();
+    rd.onload = function(){
+      $("imp-text").value = String(rd.result || "");
+      if (!$("imp-name").value.trim()) $("imp-name").value = f.name.replace(/\.[^.]*$/, "").slice(0, 80);
+      impStale();
+      impMsg("Loaded " + esc(f.name) + ". Preview it, then save.");
+    };
+    rd.onerror = function(){ impMsg("Couldn't read that file.", "bad"); };
+    rd.readAsText(f);
+  });
+})();
+
+// bootstrap
+(function initGate(){
+  // round-count control (1..12)
+  const rc = $("round-count");
+  for (let i = 1; i <= 12; i++) { const o = document.createElement("option"); o.value = i; o.textContent = i; rc.appendChild(o); }
+  rc.value = 3;
+  rc.addEventListener("change", renderRoundPickers);
+  renderRoundPickers();
+  // admin token unlock (page-session only; debounced)
+  const at = $("admin-token");
+  let t = null;
+  at.addEventListener("input", function(){
+    adminToken = at.value;
+    if (t) { clearTimeout(t); t = null; }
+    t = setTimeout(function(){ t = null; refreshManagement(); }, 500);
+  });
+  // Unlock button / Enter. Submitting is also what prompts a password manager
+  // to offer to save the token; the form never actually navigates.
+  $("admin-form").addEventListener("submit", function(e){
+    e.preventDefault();
+    if (t) { clearTimeout(t); t = null; }
+    adminToken = at.value;
+    refreshManagement();
+  });
+})();
+if (localStorage.getItem(GAME_KEY) && localStorage.getItem(TOKEN_KEY)) {
+  enterGame(parseInt(localStorage.getItem(GAME_KEY),10), localStorage.getItem(TOKEN_KEY), null);
+}
+setInterval(poll, 1000);
+</script>
+</body>
+</html>

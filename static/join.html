@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Report in — Questionable Intel</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/theme.js"></script>
+</head>
+<body class="join">
+<div class="join-page">
+  <div class="phone-brand">Questionable Intel</div>
+  <div class="join-wrap">
+    <label class="field-label" for="code">Room code on the TV</label>
+    <input id="code" class="code-input" type="text" maxlength="4" autocapitalize="characters" autocorrect="off"
+           autocomplete="off" placeholder="KQ7R" inputmode="text">
+    <button id="find" class="phone-btn" onclick="lookupTeams()">Find my game</button>
+
+    <div id="team-section" class="join-section hidden">
+      <div class="join-title" id="teams-label">Which squad were you?</div>
+      <ul class="join-team-list" id="team-list"></ul>
+      <label class="join-title" for="team-name" id="new-label">Or stand up a new squad</label>
+      <input id="team-name" class="name-input" type="text" maxlength="40" placeholder="Squad name" autocapitalize="words">
+      <button class="phone-btn" onclick="joinNew()">Report in</button>
+    </div>
+
+    <div id="status" class="join-hint" role="status"></div>
+  </div>
+</div>
+<script>
+const codeInput = document.getElementById("code");
+const statusEl = document.getElementById("status");
+let currentTeams = [];
+
+async function post(path, body){
+  const r = await fetch(path, {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body)});
+  return r.json();
+}
+
+async function lookupTeams(){
+  const code = codeInput.value.trim().toUpperCase();
+  if (code.length < 4) { statusEl.textContent = "The code is 4 characters."; return; }
+  statusEl.textContent = "Looking…";
+  try {
+    const res = await post("/api/game/teams", {code});
+    if (res.error) { statusEl.textContent = humanError(res.error); return; }
+    statusEl.textContent = "";
+    currentTeams = res.teams;
+    renderTeams();
+  } catch(e) {
+    statusEl.textContent = "Can't reach the game. Ask the host for the wifi name.";
+  }
+}
+
+function humanError(e){
+  if (e === "no game with that code") return "No game has that code. Check the TV and try again.";
+  if (e === "team or PIN not recognised") return "That PIN doesn't match. It's on your squad's first phone, or ask the host.";
+  if (e === "this game is full") return "This game is full. Ask the host.";
+  if (e.startsWith("too many")) return "Too many tries. Wait a minute and try again.";
+  return e;
+}
+
+function renderTeams(){
+  document.getElementById("find").classList.add("hidden");
+  const sec = document.getElementById("team-section");
+  sec.classList.remove("hidden");
+  const list = document.getElementById("team-list");
+  const none = currentTeams.length === 0;
+  document.getElementById("teams-label").classList.toggle("hidden", none);
+  document.getElementById("new-label").textContent = none ? "Name your squad" : "Or stand up a new squad";
+  list.innerHTML = currentTeams.map(t =>
+    `<li><button class="squad-btn" onclick="rejoin(${t.id})">${guidon(t.color_index, 46)}<span>${escapeHtml(t.name)}</span></button></li>`
+  ).join("");
+}
+
+// Escapes quotes too: several call sites interpolate into attribute values.
+function escapeHtml(x){ return String(x ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;"); }
+
+async function rejoin(teamId){
+  const code = codeInput.value.trim().toUpperCase();
+  // Rejoining needs the squad's PIN: everyone with the room code sees this list.
+  const pin = (prompt("Enter your squad's 6-digit PIN. It's on your squad's first phone, or ask the host.") || "").trim();
+  if (!pin) return;
+  const res = await post("/api/game/join", {code, team_id: teamId, pin});
+  if (res.error) { statusEl.textContent = humanError(res.error); return; }
+  enter(res);
+}
+
+async function joinNew(){
+  const code = codeInput.value.trim().toUpperCase();
+  const name = document.getElementById("team-name").value.trim() || "Squad";
+  if (code.length < 4) { statusEl.textContent = "The code is 4 characters."; return; }
+  const res = await post("/api/game/join", {code, team_name: name});
+  if (res.error) { statusEl.textContent = humanError(res.error); return; }
+  enter(res);
+}
+
+function enter(res){
+  localStorage.setItem("tk_team_token", res.join_token);
+  localStorage.setItem("tk_team_id", res.team_id);
+  localStorage.setItem("tk_team_name", res.name);
+  localStorage.setItem("tk_game_id", res.game_id);
+  location.href = "/play";
+}
+
+// The QR code links to /join?code=XXXX, so skip straight to picking a squad.
+const qrCode = new URLSearchParams(location.search).get("code");
+if (qrCode) { codeInput.value = qrCode.toUpperCase(); lookupTeams(); }
+</script>
+</body>
+</html>

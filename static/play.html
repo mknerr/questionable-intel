@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Questionable Intel</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/theme.js"></script>
+</head>
+<body class="play">
+<div class="play-wrap" id="wrap">
+  <div class="center-state" id="loading"><div class="sub">Loading…</div></div>
+</div>
+<script>
+const TTOKEN = "tk_team_token", TID = "tk_team_id", GID = "tk_game_id", TNAME = "tk_team_name";
+let state = null, localLocked = false, selectedOpt = null, selectedFor = null, painted = null, submitError = "";
+
+function $(id){ return document.getElementById(id); }
+// Escapes quotes too: several call sites interpolate into attribute values.
+function esc(x){ return String(x ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;"); }
+
+const teamToken = () => localStorage.getItem(TTOKEN) || "";
+const teamId = () => parseInt(localStorage.getItem(TID), 10);
+const gameId = () => parseInt(localStorage.getItem(GID), 10);
+
+async function post(path, body){
+  const r = await fetch(path, {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body)});
+  return r.json();
+}
+
+async function poll(){
+  if (!teamToken()) { location.href = "/join"; return; }
+  try {
+    const r = await fetch(`/api/state?game_id=${gameId()}&role=team`, {headers: {"X-Token": teamToken()}});
+    const s = await r.json();
+    if (s.error) { location.href = "/join"; return; }
+    state = s;
+    render(s);
+  } catch(e) { /* offline */ }
+}
+
+function myTeam(s){
+  return (s.teams||[]).find(t => t.id === teamId()) || null;
+}
+
+function myPlace(s){
+  const sorted = [...(s.teams||[])].sort((a,b)=>b.total-a.total);
+  const idx = sorted.findIndex(t => t.id === teamId());
+  return idx < 0 ? null : idx + 1;
+}
+
+// Rebuild the screen only when `key` changes, so polling never wipes a half-typed answer.
+function paint(key, html){
+  if (key === painted) return;
+  painted = key;
+  $("wrap").innerHTML = html;
+}
+
+function render(s){
+  if (s.state === "lobby") { renderLobby(s); return; }
+  if (s.state === "question") { renderQuestion(s); return; }
+  if (s.state === "revealed") { renderReveal(s); return; }
+  if (s.state === "round_end") { renderRoundEnd(s); return; }
+  if (s.state === "final" || s.state === "finished") { renderFinal(s); return; }
+}
+
+function ordinal(n){ if (!n) return ""; const r = n % 10, h = n % 100; if (h>=11&&h<=13) return "th"; return r===1?"st":r===2?"nd":r===3?"rd":"th"; }
+function placeText(s){ const p = myPlace(s); return p ? p + ordinal(p) + " place" : ""; }
+
+function tagHtml(s){
+  const me = myTeam(s);
+  const total = me ? me.total : 0;
+  return `<div class="dog-tag">
+    <div class="hole"></div>
+    <div class="lines">
+      <div>${esc(me ? me.name : "Squad")}</div>
+      <div>${placeText(s)} · ${total} pts</div>
+      ${s.my_pin ? `<div title="Use this PIN to rejoin from another phone">PIN ${esc(s.my_pin)}</div>` : ""}
+    </div>
+    ${guidon(me ? me.color_index : 0, 46)}
+  </div>`;
+}
+function updateTag(s){ $("tag").innerHTML = tagHtml(s); }
+
+function renderLobby(s){
+  const me = myTeam(s);
+  paint("lobby", `
+    <div class="tag-slot" id="tag"></div>
+    <div class="play-body">
+      <div class="center-state">
+        <div class="stencil">Formed up</div>
+        <div class="line">You're in. Watch the TV.</div>
+        <div class="sub">Waiting for the host to start.</div>
+      </div>
+      ${s.my_pin ? `<div class="small-muted">Your squad PIN is <b>${esc(s.my_pin)}</b>. You'll need it to rejoin from a different phone.</div>` : ""}
+      <label class="field-label" for="rename">Squad name (edit until the game starts)</label>
+      <div class="rename-row">
+        <input id="rename" class="name-input" value="${esc(me?me.name:"")}" maxlength="40">
+        <button onclick="doRename()">Save</button>
+      </div>
+    </div>`);
+  updateTag(s);
+}
+
+function doRename(){
+  const name = $("rename").value.trim() || "Squad";
+  post("/api/team/rename", {join_token: teamToken(), name}).then(()=>{
+    localStorage.setItem(TNAME, name);
+  });
+}
+
+function renderQuestion(s){
+  const q = s.question;
+  const answered = s.my_answer != null || localLocked;
+  if (q.id !== selectedFor) { selectedFor = q.id; selectedOpt = null; }
+
+  const shell = (inner) => `
+    <div class="tag-slot" id="tag"></div>
+    <div class="play-track"><div class="play-fill" id="clock-bar"></div></div>
+    <div class="play-body">
+      <div class="submit-error hidden" id="submit-error" role="alert"></div>
+      <div class="play-meta field-label"><span>Question ${q.position}</span><span id="clock-text"></span></div>
+      <div class="play-stem">${esc(q.stem)}</div>
+      ${inner}
+    </div>`;
+
+  if (answered) {
+    const sent = s.my_answer ? s.my_answer.answer_text : null;
+    paint(`q:${q.id}:locked:${sent}`, shell(`
+      <div class="center-state">
+        <div class="stencil">Roger</div>
+        <div class="line">${sent != null ? "Answer received: " + esc(sent) : "Sending…"}</div>
+        <div class="sub">Stand by. Watch the TV for the reveal.</div>
+      </div>`));
+  } else {
+    let controls = "";
+    if (q.type === "mc" && q.options) {
+      const saved = draft(q.id);
+      controls = q.options.map((o,i)=>`
+        <button class="opt-btn ${saved===String(i)?"selected":""}" onclick="selectOpt(${i})">
+          <span class="tab"><span class="letter">${optionLetter(i)}</span><span class="word">${optionWord(i)}</span></span>
+          <span class="text">${esc(o)}</span>
+        </button>`).join("");
+      controls += `<button class="phone-btn play-submit" onclick="submitMC()" ${saved === null ? "disabled":""}>Send it</button>`;
+    } else if (q.type === "numeric") {
+      controls = `<input id="num" type="text" inputmode="decimal" class="text-field" placeholder="Your number" aria-label="Your number" oninput="saveDraft(${q.id}, this.value)" value="${esc(draft(q.id)||"")}">
+        <button class="phone-btn" onclick="submitNumeric()">Send it</button>`;
+    } else {
+      controls = `<input id="txt" type="text" class="text-field" placeholder="Your answer" aria-label="Your answer" autocomplete="off" oninput="saveDraft(${q.id}, this.value)" value="${esc(draft(q.id)||"")}">
+        <button class="phone-btn" onclick="submitText()">Send it</button>`;
+    }
+    paint(`q:${q.id}:open`, shell(controls));
+  }
+
+  updateTag(s);
+  $("submit-error").textContent = submitError;
+  $("submit-error").classList.toggle("hidden", !submitError);
+  const urgent = s.clock_running && s.clock_remaining <= 10;
+  $("clock-text").textContent = s.clock_running ? `${s.clock_remaining}s left` : "";
+  $("clock-bar").style.width = s.clock_running ? clockPercent(s) + "%" : "0";
+  $("clock-bar").classList.toggle("urgent", urgent);
+}
+
+function selectOpt(i){
+  selectedOpt = i;
+  const q = state.question;
+  saveDraft(q.id, String(i));
+  document.querySelectorAll(".opt-btn").forEach((b,j)=>b.classList.toggle("selected", j===i));
+  document.querySelector(".play-submit").disabled = false;
+}
+
+function showError(msg){
+  submitError = msg;
+  render(state);
+  setTimeout(() => { submitError = ""; if (state && state.state === "question") render(state); }, 4000);
+}
+
+// Returns the server's reply, or null after showing why the answer didn't land.
+// The draft stays saved, so the answer comes back on screen for another try.
+async function send(text){
+  localLocked = true;
+  render(state);
+  let res;
+  try {
+    res = await post("/api/answer", {join_token: teamToken(), answer_text: text});
+  } catch(e) {
+    localLocked = false;
+    showError("Couldn't reach the game. Try again.");
+    return null;
+  }
+  localLocked = false;
+  if (res.error) { showError(res.error); return null; }
+  return res;
+}
+
+async function submitMC(){
+  const q = state.question;
+  const i = selectedOpt !== null ? selectedOpt : parseInt(draft(q.id),10);
+  if (i == null || Number.isNaN(i)) return;
+  const res = await send(q.options[i]);
+  if (!res) return;
+  if (res.is_late) { clearDraft(q.id); }
+  poll();
+}
+
+async function submitText(){
+  const q = state.question;
+  const v = $("txt").value;
+  if (!v.trim()) return;
+  const res = await send(v);
+  if (!res) return;
+  if (!res.is_late) clearDraft(q.id);
+  poll();
+}
+
+async function submitNumeric(){
+  const q = state.question;
+  const v = $("num").value;
+  if (!v.trim()) return;
+  const res = await send(v);
+  if (!res) return;
+  if (!res.is_late) clearDraft(q.id);
+  poll();
+}
+
+function totalsHtml(s, label){
+  const me = myTeam(s);
+  const pin = s.my_pin ? `<div class="small-muted result-pin">Squad PIN ${esc(s.my_pin)}</div>` : "";
+  return `${pin}<div class="result-total"><span>${label}</span><b>${me ? me.total : 0} pts</b></div>`;
+}
+
+function renderReveal(s){
+  const me = myTeam(s);
+  const go = s.my_correct;
+  const delta = s.my_delta || 0;
+  const q = s.question;
+  // Typed answers are scored by the host's taps, so a miss may not be final yet.
+  const sub = go ? `Hooah! +${delta} ${delta === 1 ? "point" : "points"}`
+    : (q && q.type === "text") ? "The host may still be judging."
+    : "Drive on. Next one's yours.";
+  const answer = q && q.answer != null
+    ? `<div class="field-label">The answer</div><div class="result-answer">${esc(q.answer)}</div>` : "";
+  const html = `
+    <div class="result-field ${go ? "go" : ""}">
+      <div class="result-team">${esc(me ? me.name : "Squad")}</div>
+      <div class="result-head">${go ? "Go" : "No go"}</div>
+      <div class="result-sub">${sub}</div>
+    </div>
+    <div class="result-rest">${answer}${totalsHtml(s, placeText(s))}</div>`;
+  paint(html, html);
+}
+
+function renderRoundEnd(s){
+  const me = myTeam(s);
+  const html = `
+    <div class="result-field ${myPlace(s)===1 ? "go" : ""}">
+      <div class="result-team">${esc(me ? me.name : "Squad")}</div>
+      <div class="result-head small">Round over</div>
+      <div class="result-sub">${placeText(s)}</div>
+    </div>
+    <div class="result-rest">
+      <div class="small-muted">Watch the TV for the standings.</div>
+      ${totalsHtml(s, "Total score")}
+    </div>`;
+  paint(html, html);
+}
+
+function renderFinal(s){
+  const me = myTeam(s);
+  const html = `
+    <div class="result-field ${myPlace(s)===1 ? "go" : ""}">
+      <div class="result-team">${esc(me ? me.name : "Squad")}</div>
+      <div class="result-head small">Order of Merit</div>
+      <div class="result-sub">${placeText(s)}</div>
+    </div>
+    <div class="result-rest">${totalsHtml(s, "Final score")}</div>`;
+  paint(html, html);
+}
+
+// Draft persistence: keep an in-progress answer across reloads.
+function draftKey(qid){ return "tk_draft_" + qid; }
+function saveDraft(qid, val){ localStorage.setItem(draftKey(qid), val); }
+function draft(qid){ return localStorage.getItem(draftKey(qid)); }
+function clearDraft(qid){ localStorage.removeItem(draftKey(qid)); }
+
+poll();
+setInterval(poll, 1200);
+</script>
+</body>
+</html>

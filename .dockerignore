@@ -1,0 +1,8 @@
+# Keep the build context small: only what the Dockerfile copies belongs in it.
+# Local data, secrets and repository tooling are never sent to the builder.
+data/
+.env
+.git
+.github
+docs
+tests/
