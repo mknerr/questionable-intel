@@ -652,7 +652,7 @@ document.addEventListener("keydown", (e)=>{
   else if (k === "r") act("reveal");
   else if (k === "s") act("skip");
   else if (k === "u") act("undo");
-  else if (k === "c"){ state && state.clock_running ? act("pause_clock") : act("start_clock"); }
+  else if (k === "c"){ state && state.clock_running && state.clock_remaining > 0 ? act("pause_clock") : act("start_clock"); }
   else if (k === "?"){ e.preventDefault(); openAdlib(); }
   else if (k >= "1" && k <= "8"){ judgeByKey(parseInt(k,10)); }
 });

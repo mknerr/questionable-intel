@@ -359,7 +359,7 @@ class GameEngine:
     def _open_question(self, conn, game_id: int, question_id: int, duration: int) -> None:
         conn.execute(
             "UPDATE games SET state = 'question', current_question_id = ?, "
-            "clock_ends_at = ?, clock_duration = ? WHERE id = ?",
+            "clock_ends_at = ?, clock_duration = ?, clock_paused_left = NULL WHERE id = ?",
             (question_id, time.time() + duration, duration, game_id))
 
     def _log(self, conn, game_id: int, action: str, label: str, payload: dict) -> None:
@@ -646,15 +646,20 @@ class GameEngine:
 
     # ---- clock -------------------------------------------------------------
     def start_clock(self, game_id: int, duration: int | None = None) -> str | None:
+        """Start the clock: for *duration* seconds if given (which also becomes the
+        game's question length), else what a pause left, else the question length."""
+        if duration is not None and duration <= 0:
+            return "duration must be positive"
         with self._wlock:
             conn = self._conn()
             try:
                 g = conn.execute("SELECT * FROM games WHERE id = ?", (game_id,)).fetchone()
-                d = duration if duration is not None else g["clock_duration"]
-                prev = {"clock_ends_at": g["clock_ends_at"],
-                        "clock_duration": g["clock_duration"]}
-                conn.execute("UPDATE games SET clock_ends_at = ?, clock_duration = ? "
-                             "WHERE id = ?", (time.time() + d, d, game_id))
+                length = duration if duration is not None else g["clock_duration"]
+                d = duration if duration is not None else (g["clock_paused_left"] or length)
+                prev = self._clock_fields(g)
+                conn.execute("UPDATE games SET clock_ends_at = ?, clock_duration = ?, "
+                             "clock_paused_left = NULL WHERE id = ?",
+                             (time.time() + d, length, game_id))
                 self._log(conn, game_id, "start_clock", "started the clock", prev)
                 conn.commit()
                 return None
@@ -668,11 +673,12 @@ class GameEngine:
                 g = conn.execute("SELECT * FROM games WHERE id = ?", (game_id,)).fetchone()
                 if g["clock_ends_at"] is None:
                     return "clock not running"
+                # The time left is kept apart from clock_duration, which is the
+                # length of every later question. An expired clock leaves nothing.
                 remaining = g["clock_ends_at"] - time.time()
-                prev = {"clock_ends_at": g["clock_ends_at"],
-                        "clock_duration": g["clock_duration"]}
-                conn.execute("UPDATE games SET clock_duration = ?, clock_ends_at = NULL "
-                             "WHERE id = ?", (max(0, int(remaining)), game_id))
+                prev = self._clock_fields(g)
+                conn.execute("UPDATE games SET clock_ends_at = NULL, clock_paused_left = ? "
+                             "WHERE id = ?", (remaining if remaining > 0 else None, game_id))
                 self._log(conn, game_id, "pause_clock", "paused the clock", prev)
                 conn.commit()
                 return None
@@ -684,17 +690,25 @@ class GameEngine:
             conn = self._conn()
             try:
                 g = conn.execute("SELECT * FROM games WHERE id = ?", (game_id,)).fetchone()
-                base = g["clock_ends_at"] if g["clock_ends_at"] else time.time()
-                prev = {"clock_ends_at": g["clock_ends_at"],
-                        "clock_duration": g["clock_duration"]}
-                conn.execute("UPDATE games SET clock_ends_at = ? WHERE id = ?",
-                             (base + seconds, game_id))
+                # Extend from now when expired or paused; the past would still be late.
+                now = time.time()
+                ends = g["clock_ends_at"]
+                base = ends if ends and ends > now else now + (g["clock_paused_left"] or 0)
+                prev = self._clock_fields(g)
+                conn.execute("UPDATE games SET clock_ends_at = ?, clock_paused_left = NULL "
+                             "WHERE id = ?", (base + seconds, game_id))
                 self._log(conn, game_id, "extend_clock", f"extended the clock by {seconds}s",
                           prev)
                 conn.commit()
                 return None
             finally:
                 conn.close()
+
+    @staticmethod
+    def _clock_fields(g) -> dict:
+        """The clock columns, as an undo payload."""
+        return {"clock_ends_at": g["clock_ends_at"], "clock_duration": g["clock_duration"],
+                "clock_paused_left": g["clock_paused_left"]}
 
     # ---- answering ---------------------------------------------------------
     def submit_answer(self, team_id: int, game_id: int, answer_text: str) -> dict:
@@ -810,10 +824,11 @@ class GameEngine:
                     conn.execute("UPDATE questions SET points = ? WHERE id = ?",
                                  (payload.get("prev_points"), payload.get("question_id")))
                 elif action in ("start_clock", "pause_clock", "extend_clock"):
-                    conn.execute("UPDATE games SET clock_ends_at = ?, clock_duration = ? "
-                                 "WHERE id = ?",
+                    conn.execute("UPDATE games SET clock_ends_at = ?, clock_duration = ?, "
+                                 "clock_paused_left = ? WHERE id = ?",
                                  (payload.get("clock_ends_at"),
-                                  payload.get("clock_duration"), game_id))
+                                  payload.get("clock_duration"),
+                                  payload.get("clock_paused_left"), game_id))
                 elif action == "add_question":
                     self._delete_questions(conn, payload.get("question_ids", []))
                 conn.execute("DELETE FROM action_log WHERE id = ?", (row["id"],))
@@ -1049,6 +1064,13 @@ class GameEngine:
                 token = secrets.token_urlsafe(32)
                 conn.execute("UPDATE games SET host_token_hash = ? WHERE id = ?",
                              (self._hash(token), game_id))
+                # The deadline is an absolute time, so a question left open has
+                # usually expired by the time it is reopened. Start it again.
+                now = time.time()
+                if g["state"] == "question" and (g["clock_ends_at"] or 0) <= now:
+                    left = g["clock_paused_left"] or g["clock_duration"]
+                    conn.execute("UPDATE games SET clock_ends_at = ?, clock_paused_left = NULL "
+                                 "WHERE id = ?", (now + left, game_id))
                 conn.commit()
                 meta = self._game_meta(conn, g)
                 meta["host_token"] = token

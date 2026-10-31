@@ -9,6 +9,8 @@ from __future__ import annotations
 import os
 import sqlite3
 
+DEFAULT_CLOCK_SECONDS = 30
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS games (
     id                 INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -20,6 +22,7 @@ CREATE TABLE IF NOT EXISTS games (
     current_question_id INTEGER,
     clock_ends_at      REAL,
     clock_duration     INTEGER NOT NULL DEFAULT 30,
+    clock_paused_left  REAL,
     created_at         REAL NOT NULL
 );
 
@@ -170,6 +173,7 @@ def init_db(path: str) -> None:
     conn = connect(path)
     try:
         conn.executescript(SCHEMA)
+        _migrate_games(conn)
         _migrate_gen_audit(conn)
         _migrate_rounds(conn)
         _migrate_teams(conn)
@@ -199,6 +203,23 @@ def _ensure_permissions(path: str) -> None:
                 os.chmod(candidate, 0o600)
         except OSError:
             pass
+
+
+def _migrate_games(conn: sqlite3.Connection) -> None:
+    """Add ``games.clock_paused_left`` to pre-existing DBs and repair what the old
+    pause did. It stored the time left in ``clock_duration``, the length of every
+    later question, so pausing an expired clock left a game at 0 seconds for good.
+    The console always used the default length, so anything else came from that.
+    Runs once, when the column is added."""
+    existing = {r["name"] for r in conn.execute("PRAGMA table_info(games)")}
+    if "clock_paused_left" in existing:
+        return
+    conn.execute("ALTER TABLE games ADD COLUMN clock_paused_left REAL")
+    conn.execute(
+        "UPDATE games SET clock_paused_left = clock_duration "
+        "WHERE state = 'question' AND clock_ends_at IS NULL AND clock_duration > 0")
+    conn.execute("UPDATE games SET clock_duration = ? WHERE clock_duration != ?",
+                 (DEFAULT_CLOCK_SECONDS, DEFAULT_CLOCK_SECONDS))
 
 
 def _migrate_gen_audit(conn: sqlite3.Connection) -> None:
